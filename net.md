@@ -8,7 +8,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/net.html
 3. [Part 1: E1000 NIC Driver](#part-1-e1000-nic-driver)
 4. [Part 2: UDP Receive Stack](#part-2-udp-receive-stack)
 5. [Code Sketches](#code-sketches)
-6. [Key Design Decisions](#key-design-decisions)
+6. [Design Decisions](#design-decisions)
 7. [Common Pitfalls](#common-pitfalls)
 
 ---
@@ -346,21 +346,15 @@ uint64 sys_recv(void) {
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. Descriptor Ring Ownership Protocol
 
 The TX and RX rings use different ownership conventions — getting these backwards is a common bug.
 
-**TX ring:**
-- CPU owns a slot when `DD = 1` (NIC has finished with it)
-- NIC owns a slot when `DD = 0` (NIC is still working or hasn't started)
-- CPU writes to `TDT` to give new work to the NIC
+TX ring: the CPU owns a slot when `DD = 1` (NIC has finished); the NIC owns it when `DD = 0`. The CPU writes to `TDT` to hand new work to the NIC.
 
-**RX ring:**
-- NIC fills a slot and sets `DD = 1` when a packet arrives
-- CPU owns a slot after seeing `DD = 1`
-- CPU writes to `RDT` to return the slot to the NIC with a fresh buffer
+RX ring: the NIC fills a slot and sets `DD = 1` when a packet arrives. The CPU takes ownership after seeing `DD = 1`, then writes to `RDT` to return the slot with a fresh buffer.
 
 | Register | Meaning | Writer |
 |----------|---------|--------|
@@ -435,16 +429,16 @@ Always process in a loop until DD is clear.
 
 ### 3. Missed Wakeup: Releasing pq->lock Before sleep()
 
-`sleep()` in xv6 must be called **while holding** the associated lock. The lock is atomically released and re-acquired around the actual sleep.
+`sleep()` in xv6 must be called while holding the associated lock. The lock is atomically released and re-acquired around the actual sleep.
 
-**Wrong:**
+Releasing the lock before the check creates a window where `ip_rx` can enqueue and call `wakeup` before `sleep` is reached:
 ```c
 release(&pq->lock);
 if (pq->head == pq->tail)
     sleep(pq, &pq->lock);   // ip_rx may have run between release and here!
 ```
 
-**Correct:**
+Hold the lock continuously through the check and the sleep call:
 ```c
 acquire(&pq->lock);
 while (pq->head == pq->tail)

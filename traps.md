@@ -9,7 +9,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/traps.html
 4. [Task 1: Backtrace](#task-1-backtrace)
 5. [Task 2: Alarm](#task-2-alarm)
 6. [Pseudo Code](#pseudo-code)
-7. [Key Design Decisions](#key-design-decisions)
+7. [Design Decisions](#design-decisions)
 8. [Common Pitfalls and Solutions](#common-pitfalls-and-solutions)
 
 ---
@@ -38,7 +38,7 @@ When a trap occurs, RISC-V hardware:
 3. Sets privilege mode to supervisor
 4. Jumps to the address in `stvec` (supervisor trap vector)
 
-**Critically, the hardware saves very little.** Registers, stack pointer, everything else — the kernel must save them manually. This is why xv6 has a dedicated **trapframe** per process.
+The hardware saves very little. Registers, stack pointer, everything else — the kernel must save them manually. This is why xv6 has a dedicated **trapframe** per process.
 
 ### The Trapframe
 
@@ -88,8 +88,8 @@ The **frame pointer (s0/fp)** always points to the top of the current frame. By 
 
 This lab has two independent tasks:
 
-1. **Backtrace** — Walk the kernel call stack and print return addresses (debugging utility)
-2. **Alarm** — Implement `sigalarm(interval, handler)` / `sigreturn()` to deliver periodic software interrupts to user processes
+1. Backtrace — Walk the kernel call stack and print return addresses (debugging utility)
+2. Alarm — Implement `sigalarm(interval, handler)` / `sigreturn()` to deliver periodic software interrupts to user processes
 
 ---
 
@@ -267,15 +267,11 @@ uint64 sys_sigreturn(void) {
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. Save the Entire Trapframe (Not Just epc)
 
-**What I tried first:** only save `epc`.
-
-**Why it breaks:** handler code is normal C code and will freely clobber registers (`a*`, `t*`, etc).
-
-**Final choice:** save the **entire** trapframe into `alarm_trapframe`, then restore it in `sigreturn`.
+The obvious first attempt is to save only `epc`. This breaks because handler code is normal C and freely clobbers registers (`a*`, `t*`, etc). The right approach is to save the entire trapframe into `alarm_trapframe` and restore it in `sigreturn`.
 
 ```
 Before alarm fires:       After sigreturn:
@@ -330,23 +326,23 @@ Reset `alarm_ticks = 0` **when alarm fires**, not in `sigreturn`. So the next in
 
 ### 1. Not Saving All Registers Before the Handler
 
-**Wrong:**
+Only saving the PC:
 ```c
 p->alarm_trapframe.epc = p->trapframe->epc;  // only save PC
 p->trapframe->epc = (uint64)p->alarm_handler;
 ```
 
-**Correct:**
+Save the full trapframe instead:
 ```c
 memmove(&p->alarm_trapframe, p->trapframe, sizeof(struct trapframe));  // save everything
 p->trapframe->epc = (uint64)p->alarm_handler;
 ```
 
-**Consequence:** Any register the handler touches (including compiler-generated temporaries) will be wrong when user code resumes.
+Any register the handler touches — including compiler-generated temporaries — will be wrong when user code resumes.
 
 ### 2. Forgetting the a0 Return Value Issue in sigreturn
 
-**Wrong:**
+Returning 0 here lets the syscall machinery overwrite the restored `a0`:
 ```c
 uint64 sys_sigreturn(void) {
     memmove(p->trapframe, &p->alarm_trapframe, sizeof(struct trapframe));
@@ -355,7 +351,7 @@ uint64 sys_sigreturn(void) {
 }
 ```
 
-**Correct:**
+Return the saved `a0` instead so the write-back is a no-op:
 ```c
 uint64 sys_sigreturn(void) {
     memmove(p->trapframe, &p->alarm_trapframe, sizeof(struct trapframe));
@@ -366,14 +362,13 @@ uint64 sys_sigreturn(void) {
 
 ### 3. Re-entrancy: Set Guard Before Redirecting
 
-**Wrong:**
+Set the guard first, then redirect:
 ```c
+// wrong order:
 p->trapframe->epc = (uint64)p->alarm_handler;  // redirect first
 p->alarm_in_handler = 1;                        // set guard after
-```
 
-**Correct:**
-```c
+// correct order:
 p->alarm_in_handler = 1;                        // guard first
 p->trapframe->epc = (uint64)p->alarm_handler;
 ```
@@ -382,22 +377,19 @@ On real systems this ordering matters. In xv6 it is less likely to bite, but the
 
 ### 4. Stopping Backtrace at the Wrong Boundary
 
-**Wrong:**
+Stopping at `fp != 0` can walk into unrelated memory. Use the page boundary instead:
 ```c
-while (fp != 0) {  // might walk into other memory!
-    ...
-}
-```
+// wrong:
+while (fp != 0) { ... }
 
-**Correct:**
-```c
+// correct:
 uint64 page_start = PGROUNDDOWN(fp);
 while (fp >= page_start && fp < page_start + PGSIZE) {
     ...
 }
 ```
 
-xv6 kernel stacks are one page each. Checking the page boundary is both sufficient and safe.
+xv6 kernel stacks are one page each. The page boundary check is both sufficient and safe.
 
 ### 5. Wrong Offsets for Stack Frame Fields
 

@@ -7,29 +7,18 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/cow.html
 2. [Core Concepts](#core-concepts)
 3. [Implementation Architecture](#implementation-architecture)
 4. [Pseudo Code](#pseudo-code)
-5. [Key Design Decisions](#key-design-decisions)
-6. [Common Pitfalls and Solutions](#common-pitfalls-and-solutions)
+5. [Design Decisions](#design-decisions)
+6. [Common Pitfalls](#common-pitfalls)
 
 ---
 
 ## What is Copy-on-Write Fork?
 
-Traditional `fork()` creates a complete copy of the parent process's memory for the child. This is wasteful because:
+Traditional `fork()` creates a full copy of the parent's memory for the child. This is wasteful for two reasons: `fork()` is almost always followed by `exec()`, which throws away all those copied pages immediately; and even without `exec()`, most pages the child inherits will never be written to.
 
-- `fork()` is almost always followed by `exec()`, which discards all the copied pages anyway
-- Even without `exec()`, many pages may never be written to by the child
+COW defers the actual copying until a write happens. On `fork()`, parent and child share the same physical pages, both mapped read-only. When either tries to write to a shared page, the hardware fires a write fault. The fault handler then allocates a private copy — and only then does real duplication happen.
 
-**Copy-on-Write (COW)** is an optimization that defers the actual copying until it's truly necessary:
-
-- On `fork()`, parent and child **share the same physical pages**
-- Pages are marked **read-only** in both processes
-- When either process tries to **write** to a shared page, a **page fault** triggers
-- At that point, a private copy is made for the writing process
-- Only then is the physical memory actually duplicated
-
-### Intuitive Analogy
-
-Think of it like a shared document in the cloud: everyone reads the same copy. Only when someone starts editing do they get their own separate version. COW applies the same principle to memory pages.
+Think of it like a shared Google Doc: everyone reads the same version until someone starts editing, at which point they branch off. COW does the same for memory pages.
 
 ---
 
@@ -37,44 +26,33 @@ Think of it like a shared document in the cloud: everyone reads the same copy. O
 
 ### 1. PTE_COW Flag
 
-To distinguish COW pages from genuinely read-only pages, we need a way to mark a page as "writable, but currently shared — copy before writing."
+We need to distinguish COW pages from genuinely read-only pages (like text). The difference matters: a write to a COW page should trigger a copy; a write to a read-only text page should kill the process.
 
-RISC-V PTEs have **RSW (Reserved for Software)** bits that the hardware ignores but software can use freely. We define:
+RISC-V PTEs have RSW (Reserved for Software) bits — bits 8–9 that hardware ignores completely. We use bit 8 as `PTE_COW`.
 
-```
-PTE_COW = bit 8 (one of the RSW bits)
-```
-
-A COW page has:
-- `PTE_W = 0` (write-protected from hardware's perspective)
-- `PTE_COW = 1` (software marker: this page is COW, not truly read-only)
-
-This distinction is crucial: when a write fault occurs, we check `PTE_COW` to know whether to copy (COW fault) or kill the process (genuine read-only violation).
+A COW page has `PTE_W = 0` (write-protected at hardware level) and `PTE_COW = 1` (our software marker). When a write fault occurs, checking `PTE_COW` tells us which case we're in.
 
 ### 2. Reference Counting
 
-When multiple processes share a physical page, we need to know when it's safe to free it. A page can only be freed when **no process** references it anymore.
-
-We maintain a **reference count** for every physical page:
+When multiple processes share a physical page, we can't free it until everyone is done with it. We track this with a reference count per physical page:
 
 ```
 page_ref[physical_addr / PGSIZE] = number of PTEs pointing to this page
 ```
 
-Key operations:
-- `kalloc()` → set ref count to 1
-- `fork()` sharing a page → increment ref count
-- `kfree()` → decrement ref count; only free if count reaches 0
+- `kalloc()` initializes the count to 1
+- `fork()` sharing a page increments it
+- `kfree()` decrements it and only frees when it hits 0
 
 ### 3. The COW Page Fault
 
 When a process writes to a COW page:
 
-1. Hardware triggers a write page fault (because `PTE_W` is cleared)
-2. The fault handler sees `PTE_COW` is set → this is a COW fault
+1. Hardware triggers a write fault (`PTE_W` is cleared)
+2. The fault handler sees `PTE_COW` is set → COW fault
 3. Two cases:
-   - **ref count == 1**: Only this process uses the page. Safely restore write permission without copying.
-   - **ref count > 1**: Other processes still share this page. Allocate a new page, copy content, update PTE.
+   - ref count == 1: we're the only one left. Just restore `PTE_W` and clear `PTE_COW` — no copy needed.
+   - ref count > 1: others still share this page. Allocate a fresh page, copy the content, update the PTE.
 
 ### 4. Memory Layout (unchanged from normal fork)
 
@@ -96,13 +74,13 @@ When a process writes to a COW page:
 +-------------------+  ← 0x0
 ```
 
-Text (code) pages are already read-only, so they never need COW treatment — they're naturally shared.
+Text pages are already read-only, so they're naturally shared without any COW machinery.
 
 ---
 
 ## Implementation Architecture
 
-### System Components
+### Components
 
 ```
 User Space
@@ -116,7 +94,7 @@ Page Fault Handler (vmfault)
 Physical Memory Allocator (kalloc.c)
 ```
 
-### Key Data Structure
+### Data Structure
 
 ```
 Physical Memory Reference Counting:
@@ -231,8 +209,7 @@ on_error:
 }
 ```
 
-**Why update the parent's PTE?**
-If we only mark the child's PTE as read-only but leave the parent writable, the parent can still write freely — defeating the purpose. Both must be write-protected.
+Notice we update the parent's PTE, not just the child's. If we left the parent's `PTE_W` set, the parent could keep writing to the shared page while the child reads it — silent data corruption.
 
 ### 3. COW Page Fault Handler
 
@@ -304,8 +281,7 @@ int copyout(pagetable_t pagetable, uint64 dst_va, char *src, uint64 len) {
 }
 ```
 
-**Why copyout() needs special handling?**
-When the kernel copies data into user space (e.g., during a system call like `read()`), it writes to user memory directly — bypassing the hardware page fault mechanism. So we must manually detect and resolve COW pages in this kernel code path.
+`copyout()` needs this because when the kernel writes into user space (e.g., during `read()`), it does so directly — bypassing the hardware page fault mechanism entirely. Without this check, the kernel would write through the COW mapping without triggering a copy.
 
 ### 5. Process Exit
 
@@ -320,26 +296,17 @@ void exit(int status) {
 }
 ```
 
-No special COW handling needed in `exit()` — the reference-counted `kfree()` takes care of everything.
+No special COW handling needed in `exit()` — reference-counted `kfree()` takes care of everything.
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
-### 1. Using RSW Bits for PTE_COW
+### 1. RSW Bits for PTE_COW
 
-**Why not reuse an existing flag?**
+We could track COW state in a per-process bitmap, but that adds complexity and requires its own synchronization. Using the RISC-V RSW bits (8–9) is simpler: the hardware ignores them, they live right in the PTE where you need them, and using the reserved bits is exactly what they're there for.
 
-We could theoretically repurpose an unused bit, but the RISC-V spec explicitly reserves bits 8–9 for supervisor software. Using them is:
-- Standard and safe (hardware ignores them)
-- Self-documenting (clear intent)
-- Non-conflicting with any current or future hardware features
-
-**Alternative considered:** Track COW state in a per-process data structure (like a bitmap). This adds complexity and requires synchronization — RSW bits are simpler and naturally per-PTE.
-
-### 2. Reference Counting with a Global Array
-
-**Approach: Fixed array indexed by physical page number**
+### 2. Global Array for Reference Counts
 
 ```
 pageref.count[PHYSTOP / PGSIZE]
@@ -351,39 +318,28 @@ pageref.count[PHYSTOP / PGSIZE]
 | Embedded in struct run | Medium | Zero | O(1) |
 | Separate allocation | High | Variable | O(1) |
 
-**Why a global array?**
-- Simple and predictable
-- O(1) access via `pa / PGSIZE`
-- Memory footprint is small: `PHYSTOP / PGSIZE` integers ≈ a few KB
+A fixed array indexed by `pa / PGSIZE` is O(1), predictable, and takes only a few KB (`PHYSTOP / PGSIZE` integers). The tradeoff is a single global lock — fine for xv6, but a bottleneck under real parallelism. Lock striping per page range would help there.
 
-**Tradeoff:** A single lock (`pageref.lock`) for the entire array creates contention under high parallelism. Fine-grained locking per page or lock striping would improve scalability — not needed for xv6.
+### 3. Skipping the Copy When ref count == 1
 
-### 3. Optimizing the ref count == 1 Case
+When a COW fault fires and the process is the only holder of the page, there's nothing to protect anymore — just restore `PTE_W` and clear `PTE_COW`. No allocation, no copy, O(1).
 
-When a COW fault occurs and the process is the **only** remaining holder of the page, we can skip copying:
-
-```
-if ref_count == 1:
-    just restore PTE_W and clear PTE_COW
-    → no allocation, no copy, O(1)
-```
-
-This happens in real workloads: when a child `exec()`s and replaces its address space, many parent pages end up with ref count back to 1. The next write by the parent is then free.
+This matters in practice: when a child `exec()`s and replaces its address space, the parent's pages drop back to ref count 1. The parent's next write to those pages is then essentially free.
 
 ### 4. Updating Both Parent and Child PTEs in uvmcopy()
 
-A subtle but critical point: during `fork()`, we must clear `PTE_W` in the **parent**'s PTEs, not just the child's.
+During `fork()`, we must clear `PTE_W` in the parent's PTEs too, not only the child's.
 
 | Scenario | Parent PTE_W | Child PTE_W | Result |
 |----------|-------------|-------------|--------|
 | Correct | Cleared | Cleared | Both get fault on write |
-| Wrong (only child) | Set | Cleared | Parent can write freely; child's copy becomes stale |
+| Wrong (only child) | Set | Cleared | Parent writes freely; child's copy becomes stale |
 
-If we forget to update the parent, the parent continues writing to the shared physical page, while the child reads those (possibly unexpected) changes — a data consistency bug.
+If the parent's PTE stays writable, the parent can silently modify the shared physical page while the child reads it.
 
 ### 5. Handling Text Pages
 
-Text (code) pages are mapped read-only (`PTE_W = 0, PTE_COW = 0`) before COW is even considered. On a write fault to a text page:
+Text pages are mapped `PTE_W = 0, PTE_COW = 0` before any of this runs. A write fault to a text page looks like:
 
 ```
 pte.valid == 1
@@ -391,100 +347,87 @@ pte.PTE_W == 0
 pte.PTE_COW == 0   ← not COW!
 ```
 
-The fault handler should detect this and kill the process (illegal write to read-only memory), rather than attempting a copy. The `PTE_COW` check ensures we distinguish the two cases correctly.
+The fault handler kills the process rather than attempting a copy. The `PTE_COW` check is what separates "deferred write" from "illegal write."
 
 ---
 
-## Common Pitfalls and Solutions
+## Common Pitfalls
 
 ### 1. Forgetting to Update the Parent's PTE in uvmcopy()
 
-**Wrong:**
 ```c
-// Only set child's PTE as COW
+// Wrong: only set child's PTE as COW
 mappages(child_pt, va, PGSIZE, pa, (flags | PTE_COW) & ~PTE_W);
 // Parent's PTE still has PTE_W set!
 ```
 
-**Correct:**
 ```c
-// Update parent's PTE to be COW too
+// Correct: update parent's PTE first
 uint64 cow_flags = (flags | PTE_COW) & ~PTE_W;
 *pte = PA2PTE(pa) | cow_flags;              // update parent PTE
-mappages(child_pt, va, PGSIZE, pa, cow_flags);  // then map child
+mappages(child_pt, va, PGSIZE, pa, cow_flags);
 ```
 
-**Consequence:** Without this, the parent can modify the shared page while the child reads it — silent data corruption.
+Without this, the parent keeps writing to the shared page while the child reads stale data.
 
 ### 2. Decrementing ref count Before Copying
 
-**Wrong:**
 ```c
-kfree((void *)old_pa);              // ref count drops; old page may be freed!
+// Wrong: page may be freed before the copy
+kfree((void *)old_pa);
 memmove(new_page, (void *)old_pa, PGSIZE);  // use-after-free!
 ```
 
-**Correct:**
 ```c
-memmove(new_page, (void *)old_pa, PGSIZE);  // copy first
-kfree((void *)old_pa);              // then release old reference
+// Correct: copy first, then release
+memmove(new_page, (void *)old_pa, PGSIZE);
+kfree((void *)old_pa);
 ```
 
-**Consequence:** If another process frees the page between your `kfree` and your `copy`, you read garbage — or trigger a panic.
+If another process holds the last reference and frees the page between your `kfree` and your `memmove`, you read garbage or panic.
 
 ### 3. Not Flushing TLB After Updating Parent's PTE
 
-After modifying the parent's PTE in `uvmcopy()`, the TLB may still cache the old (writable) mapping. The kernel must ensure the TLB is flushed before returning from `fork()`.
-
-In xv6, `sfence.vma` flushes the TLB. This is typically done as part of context switching, but be aware that stale TLB entries can allow writes to bypass the write-protection and skip the COW fault entirely.
+After modifying the parent's PTE in `uvmcopy()`, the TLB may still cache the old writable mapping. In xv6, `sfence.vma` handles this and is typically invoked during context switching — but a stale TLB entry can silently let writes bypass the write-protection, skipping the COW fault entirely.
 
 ### 4. Out-of-Memory During COW Fault
 
-If `kalloc()` fails during a COW page fault, the process cannot proceed. The correct behavior is to kill the process:
+If `kalloc()` fails mid-fault, the process has nowhere to go. Return an error and kill it — don't silently return 0, which would let the process write through a mapping it doesn't own.
 
 ```c
 void *new_page = kalloc();
 if (new_page == 0) {
-    // Can't recover — kill the process
     p->killed = 1;
     return -1;
 }
 ```
 
-Do not return 0 and silently continue — the user process would be writing to a page it doesn't own.
-
 ### 5. Race Condition on Reference Count
-
-The reference count must be modified atomically. A typical race:
 
 ```
 Process A reads ref count: 1
 Process B reads ref count: 1       ← both think they're alone!
 Process A skips copy, sets PTE_W
-Process B skips copy, sets PTE_W   ← now two processes share a "writable" page!
+Process B skips copy, sets PTE_W   ← two processes now share a "writable" page!
 ```
 
-**Solution:** Hold `pageref.lock` for the entire check-and-update sequence, not just the read.
+Hold `pageref.lock` for the entire check-and-update sequence, not just the read.
 
 ### 6. Double-Freeing a Shared Page
-
-If two processes both decrement the ref count to 0 simultaneously (race), both may try to free the same page:
 
 ```
 Process A: count = 1 → 0, free page
 Process B: count = 1 → 0, free page  ← double free!
 ```
 
-**Solution:** The decrement and the free decision must be atomic (under the same lock).
+The decrement and free decision must be atomic under the same lock.
 
 ### 7. uvmcopy() Partial Failure Cleanup
 
-If `uvmcopy()` fails halfway through (e.g., `mappages` fails), all pages mapped so far need to be released — but their ref counts were already incremented. The cleanup must decrement ref counts correctly, not just free pages:
+If `uvmcopy()` fails halfway (e.g., `mappages` runs out of memory), all pages already mapped to the child need to be released — including decrementing their ref counts. Passing `do_free = 1` to `uvmunmap` triggers `kfree` on each, which handles the ref count correctly.
 
 ```c
 on_error:
-    // for each page already mapped to child:
     uvmunmap(child_pagetable, 0, mapped_pages, 1);  // calls kfree → decrements ref count
     return -1;
 ```
-

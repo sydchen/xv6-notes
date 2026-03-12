@@ -10,7 +10,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/pgtbl.html
 5. [Task 3: Print a Page Table (vmprint)](#task-3-print-a-page-table-vmprint)
 6. [Task 4: Superpages](#task-4-superpages)
 7. [Code Sketches](#code-sketches)
-8. [Key Design Decisions](#key-design-decisions)
+8. [Design Decisions](#design-decisions)
 9. [Common Pitfalls](#common-pitfalls)
 
 ---
@@ -46,7 +46,7 @@ Each PTE holds a **physical page number (PPN)** and **flag bits**:
 | A | 6 | Accessed |
 | D | 7 | Dirty |
 
-**Leaf vs. non-leaf:** If R, W, and X are all zero, the PTE points to the next level table. If any of R/W/X is set, it is a leaf — it directly maps to a physical page.
+Leaf vs. non-leaf: if R, W, and X are all zero, the PTE points to the next level table. If any of R/W/X is set, it is a leaf — it directly maps to a physical page.
 
 ### Fixed-Address User Virtual Layout
 
@@ -440,13 +440,11 @@ for (a = va; a < va + npages * PGSIZE; a += sz) {
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. USYSCALL: Read-Only from User, Read-Write from Kernel
 
-The `PTE_U` flag without `PTE_W` ensures user code can read the shared page but cannot write it. Only the kernel (which bypasses `PTE_U` checks in supervisor mode) can update the `pid` field.
-
-This is a deliberate security boundary: the fast path is fast precisely because the kernel controls what's in the page.
+`PTE_U` without `PTE_W` ensures user code can read the shared page but cannot write it. Only the kernel — which bypasses `PTE_U` checks in supervisor mode — can update the `pid` field. The fast path works because the kernel controls the page contents.
 
 ### 2. vmprint: Distinguish Leaf vs. Non-Leaf by R/W/X Bits
 
@@ -480,9 +478,7 @@ For a level-1 leaf mapping, both VA and PA must be 2 MB-aligned. Otherwise offse
 
 ### 1. Forgetting to Unmap USYSCALL in proc_freepagetable
 
-If the physical page is freed first, later page-table walking can dereference stale mappings.
-
-**Correct order:**
+If the physical page is freed first, later page-table walking can dereference stale mappings. Unmap before freeing:
 ```c
 proc_freepagetable(p->pagetable, p->sz);  // unmap USYSCALL here...
 p->pagetable = 0;
@@ -494,15 +490,13 @@ Call `uvmunmap(pagetable, USYSCALL, 1, 0)` inside `proc_freepagetable`, not insi
 
 ### 2. vmprint: Recursing into Leaf PTEs
 
-A level-1 superpage entry is still a leaf (`R/W/X != 0`). Recursing by level number alone can treat data pages as page tables.
-
-**Wrong:**
+A level-1 superpage entry is still a leaf (`R/W/X != 0`). Recursing by level number alone treats data pages as page tables:
 ```c
-if (level < 2)   // always recurse at levels 0 and 1
+if (level < 2)   // wrong: always recurses at levels 0 and 1
     vmprintwalk((pagetable_t)pa, level + 1);
 ```
 
-**Correct:**
+Check the leaf bits instead:
 ```c
 if ((pte & (PTE_R | PTE_W | PTE_X)) == 0)   // non-leaf → recurse
     vmprintwalk((pagetable_t)pa, level + 1);

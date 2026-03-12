@@ -9,7 +9,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/syscall.html
 4. [Task 2: interpose() — Process Sandboxing](#task-2-interpose--process-sandboxing)
 5. [Task 3: Memory Attack](#task-3-memory-attack)
 6. [Code Sketches](#code-sketches)
-7. [Key Design Decisions](#key-design-decisions)
+7. [Design Decisions](#design-decisions)
 
 ---
 
@@ -292,7 +292,7 @@ attack(void)
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. Bitmask Representation
 

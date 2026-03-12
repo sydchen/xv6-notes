@@ -9,16 +9,14 @@ https://pdos.csail.mit.edu/6.1810/2023/labs/thread.html
 4. [Task 2: Hash Table with Locks](#task-2-hash-table-with-locks)
 5. [Task 3: Barrier with Condition Variables](#task-3-barrier-with-condition-variables)
 6. [Code Sketches](#code-sketches)
-7. [Key Design Decisions](#key-design-decisions)
+7. [Design Decisions](#design-decisions)
 8. [Common Pitfalls](#common-pitfalls)
 
 ---
 
 ## Background: What is a Thread?
 
-A **thread** is an independent execution context sharing memory with other threads in the same process. Each thread needs its own:
-- **Stack** — local variables, function call frames
-- **Register state** — PC, SP, and all saved registers
+A **thread** is an independent execution context sharing memory with other threads in the same process. Each thread needs its own stack (local variables, function call frames) and register state (PC, SP, and all saved registers).
 
 Switching from thread A to thread B means:
 1. Save A's registers somewhere
@@ -371,7 +369,7 @@ void barrier(void) {
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. Save Only Callee-Saved Registers
 
@@ -413,16 +411,16 @@ Condition variables are stateless — a `broadcast` that fires before a `wait` i
 
 ### 1. Setting sp to the Bottom Instead of Top of Stack
 
-Stacks on RISC-V grow **downward** (from high to low addresses). The stack pointer must start at the **top** (highest address) of the allocated region.
+Stacks on RISC-V grow downward. The stack pointer must start at the top (highest address) of the allocated region.
 
-**Wrong:**
+Starting at the bottom:
 ```c
 t->context.sp = (uint64)t->stack;           // bottom — first push goes below!
 ```
 
-**Correct:**
+Start at the top:
 ```c
-t->context.sp = (uint64)(t->stack + STACK_SIZE);  // top
+t->context.sp = (uint64)(t->stack + STACK_SIZE);  // correct
 ```
 
 ### 2. Setting ra to 0 or Leaving It Unset
@@ -451,17 +449,15 @@ If `put` also modifies a global counter or global list, locking per-bucket is in
 
 Keep locking scope small, but include **all** shared mutable state.
 
-### 5. Using `==` Instead of `while` for Condition Variable Wait
+### 5. Using `if` Instead of `while` for Condition Variable Wait
 
-`pthread_cond_wait` can have **spurious wakeups** — it can return even when no `broadcast` was called.
-
-**Wrong:**
+`pthread_cond_wait` can have spurious wakeups — it can return even when no `broadcast` was called. An `if` check doesn't re-test the condition:
 ```c
 if (b.round == my_round)
     pthread_cond_wait(&b.cond, &b.lock);
 ```
 
-**Correct:**
+Always loop:
 ```c
 while (b.round == my_round)
     pthread_cond_wait(&b.cond, &b.lock);

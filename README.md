@@ -19,9 +19,9 @@
 
 ## English Version
 
-I really want to recommend an amazing MIT EECS course: **6.1810: Operating System Engineering**.
+I really want to recommend an MIT EECS course: **6.1810: Operating System Engineering**.
 
-What makes this course so compelling is that it does not stop at theory. You directly work on a Unix-like operating system called **xv6**. Step by step, the course helps you understand:
+This course skips the theory-only approach and has you directly modifying **xv6**, a small Unix-like operating system. You work through:
 
 * how virtual memory is actually implemented
 * what a file system really looks like inside the kernel
@@ -30,8 +30,8 @@ What makes this course so compelling is that it does not stop at theory. You dir
 * how `mmap` integrates with memory management
 * and even how to write a very minimal Intel e1000 network driver
 
-Many things that feel "obvious" when using Linux become much more interesting once you take them apart layer by layer.
+A lot of things that feel obvious when using Linux turn out to be far more interesting once you crack them open.
 
-You do not necessarily need to enroll formally. You can open the course PDFs, follow the schedule, and work through the homework and labs. By implementing each piece yourself, you gradually build a solid understanding of core OS kernel techniques. This course is highly hands-on, so if you enjoy reading code, modifying code, chasing stack traces, and debugging late into the night, you will probably love it.
+You don't need to enroll formally. Open the course PDFs, follow the schedule, work through the labs. If you enjoy reading code, modifying code, chasing stack traces, and debugging late into the night, you'll fit right in.
 
-To be honest, the course is not easy. It usually takes a few months to absorb everything, but the experience of implementing textbook concepts yourself is absolutely worth it.
+The course isn't easy — expect a few months to really absorb it. But implementing the stuff you've only read about in textbooks is absolutely worth the time.

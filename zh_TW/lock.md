@@ -8,7 +8,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/lock.html
 3. [任務 1：Per-CPU 記憶體配置器](#任務-1per-cpu-記憶體配置器)
 4. [任務 2：Read-Write Spinlock](#任務-2read-write-spinlock)
 5. [Code Sketches](#code-sketches)
-6. [關鍵設計決策](#關鍵設計決策)
+6. [設計決策](#設計決策)
 7. [常見陷阱](#常見陷阱)
 
 ---
@@ -21,9 +21,9 @@ xv6 原本的記憶體配置器只有一個全域 free list：
 kmem.lock ──► freelist → page → page → page → ...
 ```
 
-在多核心環境下，所有 CPU 的 `kalloc()` / `kfree()` 都要搶同一把鎖。CPU 會花很多時間 spin 等待，而不是做真正工作，這就是 **lock contention**。
+在多核心環境下，所有 CPU 的 `kalloc()` / `kfree()` 都要搶同一把鎖。CPU 會花很多時間 spin 等待，而不是做真正工作，這就是 lock contention。
 
-典型改善方式是：把共享資源做 **sharding**，讓不同 CPU 盡量獨立操作。
+典型改善方式是把共享資源做 sharding，讓不同 CPU 盡量獨立操作。
 
 ---
 
@@ -103,7 +103,7 @@ rwlock 可以放寬：
 
 若沒有特別處理，讀者持續湧入會讓寫者飢餓（reader count 很難歸零）。
 
-**Writer priority** 的規則是：只要有寫者在等，新的讀者就先擋住。已在內部的讀者可跑完，但不再放新讀者進來。
+Writer priority 的規則是：只要有寫者在等，新的讀者就先擋住。已在內部的讀者可跑完，但不再放新讀者進來。
 
 ```text
 readers_waiting  = 0    (讀者視角：我能進嗎)
@@ -271,11 +271,11 @@ void write_release(struct rwspinlock *rwlk) {
 
 ---
 
-## 關鍵設計決策
+## 設計決策
 
 ### 1. 一次偷一頁
 
-本地 list 空時，從其他 CPU 一次只偷 **一頁**，而不是整串。
+本地 list 空時，從其他 CPU 一次只偷一頁，而不是整串。
 
 | 策略 | 區域性 | 每次偷取成本 |
 |------|--------|--------------|
@@ -290,7 +290,7 @@ void write_release(struct rwspinlock *rwlk) {
 
 ### 3. writers_waiting 只擋新讀者
 
-writer priority 的重點是擋 **新進** 讀者，不是把已進入的讀者踢出去。已在臨界區的讀者跑完就離開。
+writer priority 的重點是擋新進讀者，不是把已進入的讀者踢出去。已在臨界區的讀者跑完就離開。
 
 所以寫者仍可能等一下，但因為不再放新讀者進來，理論上最終可進入。
 
@@ -325,13 +325,13 @@ void write_release(struct rwspinlock *rwlk) {
 
 ### 1. 沒關中斷就呼叫 cpuid()
 
-**錯誤：**
 ```c
 int c = cpuid();           // 這裡可能被中斷搬家
 acquire(&kmem[c].lock);    // 接下來可能操作錯誤 CPU 的 list
 ```
 
-**正確：**
+`cpuid()` 與 `acquire()` 間若發生 migration，鎖到的 CPU 與實際執行 CPU 會不一致。要用 `push_off()` 關中斷後再讀取 CPU 編號，用完再 `pop_off()`。
+
 ```c
 push_off();
 int c = cpuid();           // 中斷關閉期間，CPU 不會被切走
@@ -340,11 +340,8 @@ acquire(&kmem[c].lock);
 pop_off();
 ```
 
-`cpuid()` 與 `acquire()` 間若發生 migration，鎖到的 CPU 與實際執行 CPU 會不一致。
-
 ### 2. spin loop 中一直持有內部鎖
 
-**錯誤：**
 ```c
 acquire(&rwlk->lock);
 while (rwlk->writer_active) {
@@ -352,7 +349,8 @@ while (rwlk->writer_active) {
 }
 ```
 
-**正確：**
+持鎖空轉時，其他執行緒拿不到鎖，`writer_active` 永遠不會被清掉，就死鎖了。loop 裡每輪都要先 release 再 acquire：
+
 ```c
 acquire(&rwlk->lock);
 while (rwlk->writer_active) {
@@ -363,16 +361,14 @@ while (rwlk->writer_active) {
 
 ### 3. read_acquire() 忘記檢查 writers_waiting
 
-**錯誤：**
 ```c
 while (rwlk->writer_active) {
     // ...
 }
 ```
 
-寫者可能已在等（`writers_waiting > 0`）但尚未 active。若不檢查 waiting，新的讀者會一直進，寫者就飢餓。
+寫者可能已在等（`writers_waiting > 0`）但尚未 active。若不檢查 waiting，新的讀者會一直進，寫者就飢餓。條件要同時檢查兩個欄位：
 
-**正確：**
 ```c
 while (rwlk->writer_active || rwlk->writers_waiting) {
     // ...
@@ -428,7 +424,7 @@ struct run *r = kmem[c].freelist;
 acquire(&kmem[i].lock);   // 兩顆 CPU 互相這樣做時容易死鎖
 ```
 
-**正確：** 先放本地鎖，再拿受害者鎖。上面的實作就是 fast path 先 release，slow path 才逐一拿 `kmem[i].lock`。
+正確做法是先放本地鎖，再拿受害者鎖。上面的實作就是 fast path 先 release，slow path 才逐一拿 `kmem[i].lock`。
 
 ---
 

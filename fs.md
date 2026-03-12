@@ -8,7 +8,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/fs.html
 3. [Task 1: Large Files (Doubly-Indirect Blocks)](#task-1-large-files-doubly-indirect-blocks)
 4. [Task 2: Symbolic Links](#task-2-symbolic-links)
 5. [Code Sketches](#code-sketches)
-6. [Key Design Decisions](#key-design-decisions)
+6. [Design Decisions](#design-decisions)
 7. [Common Pitfalls](#common-pitfalls)
 
 ---
@@ -159,7 +159,7 @@ When `open()` encounters a `T_SYMLINK` inode:
 5. Repeat if the new inode is also a symlink (recursive resolution)
 6. Stop if depth ≥ 10 (cycle detection)
 
-Rule of thumb: **hold inode lock when reading `ip->type`**, and **release it before calling `namei()`**.
+Hold the inode lock when reading `ip->type`, and release it before calling `namei()`.
 
 ---
 
@@ -332,7 +332,7 @@ if (ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. Trade One Direct Block for Doubly-Indirect
 
@@ -364,7 +364,7 @@ Simple and sufficient for xv6. The known downside is dangling symlinks when targ
 
 ### 4. inode Lock Protocol for Symlink Following
 
-Important constraint: **do not call `namei()` while holding an inode lock**. `namei()` acquires locks internally, so this can deadlock.
+Don't call `namei()` while holding an inode lock — `namei()` acquires locks internally and can deadlock.
 
 The required sequence for each hop:
 ```
@@ -389,15 +389,15 @@ If depth reaches 10 and the current inode is still a symlink, we assume a cycle 
 
 ### 1. Forgetting to Subtract Previous Ranges in bmap()
 
-Each indirect tier must first subtract the block count of all previous tiers before computing its local index.
+Each indirect tier must subtract the block count of all previous tiers before computing its local index.
 
-**Wrong:**
+Missing the subtraction:
 ```c
 // Doubly-indirect case
 uint idx1 = bn / NINDIRECT;   // bn was never adjusted for singly-indirect range!
 ```
 
-**Correct:**
+With the subtraction:
 ```c
 bn -= NDIRECT;
 if (bn < NINDIRECT) { /* singly-indirect */ }
@@ -408,14 +408,13 @@ uint idx1 = bn / NINDIRECT;
 
 ### 2. Freeing Blocks in the Wrong Order in itrunc()
 
-**Wrong:** free the root block first, then try to read child pointers from it.
-
+Freeing the root block first, then trying to read child pointers from it:
 ```c
 bfree(ip->dev, ip->addrs[NDIRECT+1]);  // root freed!
 bp = bread(ip->dev, ip->addrs[NDIRECT+1]);  // reading freed block — garbage!
 ```
 
-**Correct:** always free leaves before their parents.
+Always free leaves before their parents.
 
 ### 3. Not Calling log_write() After Modifying Indirect Blocks
 

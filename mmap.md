@@ -7,7 +7,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/mmap.html
 2. [Core Concepts](#core-concepts)
 3. [Implementation Architecture](#implementation-architecture)
 4. [Pseudo Code](#pseudo-code)
-5. [Key Design Decisions](#key-design-decisions)
+5. [Design Decisions](#design-decisions)
 6. [Common Pitfalls and Fixes](#common-pitfalls-and-fixes)
 7. [Performance Optimization Ideas](#performance-optimization-ideas)
 
@@ -19,10 +19,10 @@ The idea of memory-mapped files is simple: map file contents into a process's vi
 
 ### Core Benefits
 
-1. **Simpler I/O**: In many cases, load/store can replace `read/write`
-2. **Shared memory**: Multiple processes can map the same file and share data
-3. **On-demand loading**: Pages are loaded only when touched (lazy loading)
-4. **Better performance**: Fewer user/kernel mode switches
+- Load/store can often replace `read/write`
+- Multiple processes can map the same file and share data
+- Pages are loaded only when touched (lazy loading)
+- Fewer user/kernel mode switches
 
 ### Basic Usage Example
 
@@ -64,15 +64,7 @@ struct vma {
 
 ### 2. Lazy Allocation
 
-When `mmap` is called, xv6 **does not allocate physical memory immediately**. Instead it:
-- Creates a VMA record only
-- Triggers a page fault on first access
-- Lets the page-fault handler allocate a page and load file content
-
-**Why lazy allocation?**
-- `mmap` can return in near O(1)
-- Physical memory is used only for touched pages
-- Works better for large file mappings
+When `mmap` is called, xv6 does not allocate physical memory immediately. It creates a VMA record only, and loads pages on demand through the page-fault handler. This lets `mmap` return in O(1), uses physical memory only for touched pages, and handles large file mappings without upfront cost.
 
 ### 3. MAP_SHARED vs MAP_PRIVATE
 
@@ -267,7 +259,7 @@ fork(void)
 }
 ```
 
-**Note**: Parent and child do not share physical pages. This keeps the implementation simple and avoids COW complexity.
+Parent and child do not share physical pages. This keeps the implementation simple and avoids COW complexity.
 
 ### 5. VMA Cleanup in Exit
 
@@ -300,11 +292,11 @@ exit(int status)
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. Virtual Address Allocation Strategy
 
-**Choice: grow upward from `process.sz`**
+New mappings grow upward from `process.sz`:
 
 ```
 +-------------------+  ← MAXVA
@@ -328,21 +320,11 @@ exit(int status)
 +-------------------+  ← 0x0
 ```
 
-**Pros:**
-- Easy to implement; consistent with heap growth direction
-- No separate virtual-address allocator needed
-- Simpler conflict handling
-
-**Cons:**
-- Reduces available heap growth space
-- Calling `sbrk` after `mmap` can easily conflict
-
-**Alternative:**
-- Grow downward from TRAPFRAME (more complex, but avoids heap interference)
+This is easy to implement and needs no separate virtual-address allocator, but it reduces available heap space — `sbrk` after `mmap` can conflict. An alternative is growing downward from TRAPFRAME, which avoids heap interference but is more complex.
 
 ### 2. VMA Data Structure
 
-**Choice: fixed-size array (16 slots)**
+A fixed-size array of 16 slots per process:
 
 ```c
 #define NVMA 16
@@ -352,29 +334,17 @@ struct proc {
 };
 ```
 
-**Pros:**
-- Simple; no dynamic allocation required
-- Bounded and predictable traversal cost
-- Easier to debug
-
-**Cons:**
-- Caps number of concurrent mappings
-- Wastes some memory on unused slots
-
-**Alternatives:**
-- Linked list: dynamic, but needs memory allocation
-- Red-black tree: faster lookup, but overkill for this lab
+Simple, no dynamic allocation, and easy to debug. The tradeoffs: concurrent mappings are capped at 16, and unused slots waste a small amount of memory. A linked list would be more flexible; a red-black tree would give faster lookup. Neither is necessary here.
 
 ### 3. Where to Do Lazy Allocation
 
-**Why load on page fault instead of at `mmap` time?**
+Loading pages at `mmap` time is O(n) — mapping a 1 GB file would allocate 256K pages and could take seconds. Loading on fault is O(1) at map time and uses physical memory only for touched pages:
 
 | Approach | mmap latency | Memory usage | Supports large files |
 |----------|--------------|--------------|----------------------|
 | Eager (load at mmap) | O(n) | High | ✗ |
 | Lazy (load on fault) | O(1) | Low | ✓ |
 
-**Practical difference:**
 ```c
 // Map a 1GB file
 void *addr = mmap(NULL, 1GB, ...);
@@ -389,51 +359,35 @@ char c = ((char*)addr)[0];
 
 ### 4. MAP_SHARED Write-Back Timing
 
-**Choice: write back on `munmap` and `exit`**
+Write back happens at `munmap` and `exit`, not after each write. Writing on every modification is expensive and unnecessary since the same page may be changed many times. Fine-grained dirty tracking would help, but the current implementation writes back all mapped pages regardless:
 
-**Why not write back immediately after each page fault/write?**
-1. Performance: writing every change is too expensive
-2. Consistency: the same page may be modified many times
-3. Simplicity: no need to track dirty pages in a fine-grained way
-
-**Dirty-bit optimization (not implemented):**
 ```c
 if pte & PTE_DIRTY:
     write_back_to_file()
 else:
-    skip  // unchanged page
+    skip  // unchanged page — optimization not yet implemented
 ```
 
-**Current implementation:**
-- Write back **all** mapped pages (whether modified or not)
-- Trade performance for simplicity and correctness
+This trades some unnecessary disk I/O for simplicity.
 
 ### 5. Page Sharing Strategy in Fork
 
-**Choice: do not share physical pages**
+Fork copies VMA metadata but not physical pages. The child loads its own pages through page faults:
 
-**Two approaches:**
-
-| Approach | Complexity | Memory usage | Consistency |
-|----------|------------|--------------|-------------|
-| Shared pages (COW) | High | Low | Complex |
-| No sharing | Low | High | Simple |
-
-**Implementation detail:**
 ```c
-// Approach 1: shared pages (not used)
-fork() {
-    // Mark parent pages read-only
-    // Child shares same physical pages
-    // On write, trigger COW
-}
-
-// Approach 2: no sharing (used)
+// Approach used: no physical page sharing
 fork() {
     // Copy only VMA metadata
     // Child loads its own pages via page fault
 }
 ```
+
+The alternative — sharing pages with COW — uses less memory but is significantly more complex. For this lab, the simpler approach is fine.
+
+| Approach | Complexity | Memory usage |
+|----------|------------|--------------|
+| Shared pages (COW) | High | Low |
+| No sharing | Low | High |
 
 ---
 
@@ -441,9 +395,9 @@ fork() {
 
 ### 1. Deadlock from Wrong Lock Ordering
 
-**Incorrect example:**
+`begin_op` may block waiting for journal space. Holding an inode lock while it blocks can deadlock:
 ```c
-// Incorrect: may deadlock
+// wrong: ilock held when begin_op blocks
 ilock(ip);
 begin_op();
 writei(...);
@@ -451,57 +405,46 @@ end_op();
 iunlock(ip);
 ```
 
-**Correct order:**
+`begin_op` must be the outermost call:
 ```c
-// Correct: begin_op must be outside
 begin_op();
 ilock(ip);
 writei(...);
 iunlock(ip);
 end_op();
 ```
-
-**Reason:** `begin_op` may block waiting for journal space. Holding an inode lock while waiting can deadlock.
 
 ### 2. File Reference Count Bug
 
-**Incorrect example:**
+Direct assignment skips the reference count:
 ```c
-// Incorrect: no ref count increment
-v->file = f;  // direct assignment
+v->file = f;  // close(fd) can now free the file while VMA still points to it
 ```
 
-**Correct way:**
+Use `filedup` to increment the count:
 ```c
-// Correct: use filedup
-v->file = filedup(f);  // increment ref count
+v->file = filedup(f);  // VMA holds its own reference
 ```
 
-**Consequence:** Without incrementing reference count, `close(fd)` may free the file while VMA still points to it (dangling pointer).
-
-**Test case:**
+Without this, closing the fd after `mmap` produces a dangling pointer:
 ```c
 int fd = open("file.txt", O_RDWR);
 void *addr = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
-close(fd);  // without filedup, file may be freed here
-
-// Accessing addr may crash (dangling pointer)
+close(fd);  // file freed here without filedup
 char c = ((char*)addr)[0];  // crash or garbage
 ```
 
 ### 3. Permission Check at the Wrong Time
 
-**Incorrect example:**
+Checking permissions after `kalloc` leaks the allocated page:
 ```c
-// Incorrect: check after allocation
 mem = kalloc();
 if (!(vma->prot & PROT_WRITE))
     return 0;  // mem leaked!
 ```
 
-**Correct way:**
+Check before allocating:
 ```c
-// Correct: check before allocation
 if (!write && !(vma->prot & PROT_WRITE))
     return 0;
 mem = kalloc();
@@ -509,17 +452,13 @@ mem = kalloc();
 
 ### 4. Ignoring Partial Last Page of a File
 
-**Problem:** File size may not be a multiple of page size.
-
-**Incorrect example:**
+File size may not be a multiple of page size. Writing a full `PGSIZE` can go past the end:
 ```c
-// Incorrect: may write past file end
-writei(ip, 0, pa, file_offset, PGSIZE);
+writei(ip, 0, pa, file_offset, PGSIZE);  // may write past file end
 ```
 
-**Correct way:**
+Cap the write to the actual remaining file data:
 ```c
-// Correct: cap write size
 max_write = PGSIZE;
 if (file_offset + max_write > ip->size)
     max_write = ip->size - file_offset;
@@ -528,7 +467,7 @@ if (max_write > 0)
     writei(ip, 0, pa, file_offset, max_write);
 ```
 
-**Example:**
+Example:
 ```
 File size: 4100 bytes
 Mapping size: 8192 bytes (2 pages)
@@ -539,47 +478,37 @@ Page 1: [4096, 8192)  → partial page, write back only 4 bytes ✓
 
 ### 5. Forgetting to Update `process.sz`
 
-**Incorrect example:**
+Without updating `p->sz`, a later `sbrk` or `mmap` may overwrite the mapped region:
 ```c
-// Incorrect: address space not extended
 addr = p->sz;
 v->addr = addr;
 v->length = length;
-// missing p->sz update
+// missing: p->sz += length
 ```
 
-**Correct way:**
+Always extend the address space:
 ```c
-// Correct: extend address space
 addr = p->sz;
 p->sz += length;  // required
 v->addr = addr;
 v->length = length;
 ```
 
-**Consequence:** Later `sbrk` or `mmap` may overwrite this mapped region.
-
 ### 6. Forgetting to Zero-Fill New Pages
 
-**Incorrect example:**
+`kalloc` may return pages with old data. If the file is smaller than one page, `readi` only fills part of it — the rest should be zero:
 ```c
-// Incorrect: no zero-fill
+// wrong: stale data in remainder of page
 mem = kalloc();
 readi(ip, 0, mem, offset, PGSIZE);
 ```
 
-**Correct way:**
+Zero-fill before reading:
 ```c
-// Correct: zero-fill first
 mem = kalloc();
 memset(mem, 0, PGSIZE);  // required
 readi(ip, 0, mem, offset, PGSIZE);
 ```
-
-**Reason:**
-- `kalloc` may return pages containing old data
-- If file size is smaller than one page, `readi` fills only part of the page
-- Unread bytes should be zero (Unix expected behavior)
 
 ---
 

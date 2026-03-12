@@ -9,7 +9,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/traps.html
 4. [任務 1：Backtrace](#任務-1backtrace)
 5. [任務 2：Alarm](#任務-2alarm)
 6. [Code Sketches](#code-sketches)
-7. [關鍵設計決策](#關鍵設計決策)
+7. [設計決策](#設計決策)
 8. [常見陷阱](#常見陷阱)
 
 ---
@@ -38,11 +38,11 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/traps.html
 3. 將特權等級切到 supervisor
 4. 跳到 `stvec`（supervisor trap vector）指定的位置
 
-**重點：硬體其實只幫你存很少。** 暫存器、stack pointer 等其餘狀態都要核心自己儲存。這就是 xv6 每個 行程 都有獨立 **trapframe** 的原因。
+硬體其實只幫你存很少——暫存器、stack pointer 等其餘狀態都要核心自己儲存。這就是每個行程都有獨立 trapframe 的原因。
 
 ### Trapframe
 
-trapframe 是每個 行程 一份的核心資料結構，記錄 trap 當下所有 user registers 的快照：
+trapframe 是每個行程一份的核心資料結構，記錄 trap 當下所有 user registers 的快照：
 
 ```c
 struct trapframe {
@@ -58,14 +58,14 @@ struct trapframe {
 }
 ```
 
-要 **回到 user space** 時，核心會：
+回到 user space 時，核心會：
 1. 從 trapframe 還原所有暫存器
 2. 把 `sepc` 設為 `trapframe->epc`（使用者程式要續跑的位置）
 3. 執行 `sret`（supervisor return）
 
 ### RISC-V Stack Frame 版面
 
-每次函式呼叫都會在 stack 上建立一個 **stack frame**：
+每次函式呼叫都會在 stack 上建立一個 stack frame：
 
 ```text
 高位址
@@ -80,7 +80,7 @@ struct trapframe {
 低位址
 ```
 
-**frame pointer（s0/fp）** 會指向目前 frame 頂端。沿著「saved fp 鏈」往回追，就能走完整個 call stack，這就是 `backtrace()` 的核心。
+frame pointer（s0/fp）會指向目前 frame 頂端。沿著「saved fp 鏈」往回追，就能走完整個 call stack，這就是 `backtrace()` 的核心。
 
 ---
 
@@ -88,8 +88,8 @@ struct trapframe {
 
 這個 lab 有兩個獨立任務：
 
-1. **Backtrace**：走訪 kernel call stack 並印出 return address（除錯工具）
-2. **Alarm**：實作 `sigalarm(interval, handler)` / `sigreturn()`，定期把控制流導向 user-space handler
+1. Backtrace：走訪 kernel call stack 並印出 return address（除錯工具）
+2. Alarm：實作 `sigalarm(interval, handler)` / `sigreturn()`，定期把控制流導向 user-space handler
 
 ---
 
@@ -115,7 +115,7 @@ struct trapframe {
 
 ### 什麼時候停止
 
-xv6 給每個 kernel stack 恰好 **一頁**。當 frame pointer 超出這一頁邊界，就代表你已經走出這個 stack 範圍。
+xv6 給每個 kernel stack 恰好一頁。當 frame pointer 超出這一頁邊界，就代表你已經走出這個 stack 範圍。
 
 ---
 
@@ -132,7 +132,7 @@ xv6 給每個 kernel stack 恰好 **一頁**。當 frame pointer 超出這一頁
 
 棘手之處在於 `handler()` 會插入在使用者程式執行的「中間」。handler 結束（透過 `sigreturn`）後，原程式必須像「沒發生任何事」一樣繼續跑：暫存器、PC、回傳值都要一致。
 
-這表示你必須儲存並還原 **整份 trapframe**。
+這表示你必須儲存並還原整份 trapframe。
 
 ### 流程總覽
 
@@ -193,7 +193,7 @@ void backtrace(void) {
 }
 ```
 
-**為什麼用一頁界線？** xv6 每個 kernel stack 固定是 `PGSIZE`，離開這個範圍就不該再走。
+xv6 每個 kernel stack 固定是 `PGSIZE`，所以用頁邊界當停止條件。
 
 ### 3. proc 結構中的 Alarm 欄位
 
@@ -245,7 +245,7 @@ if (p->alarm_interval > 0 && !p->alarm_in_handler) {
 yield();
 ```
 
-關鍵點：核心不會直接呼叫 handler，而是改寫 `trapframe->epc`。等 `sret` 後，CPU 在 user mode 直接從 handler 位址繼續。
+核心不會直接呼叫 handler，而是改寫 `trapframe->epc`。等 `sret` 後，CPU 在 user mode 直接從 handler 位址繼續。
 
 ### 6. sys_sigreturn()
 
@@ -266,15 +266,11 @@ uint64 sys_sigreturn(void) {
 
 ---
 
-## 關鍵設計決策
+## 設計決策
 
 ### 1. 儲存整份 Trapframe（不只 epc）
 
-**一開始容易想成：** 只存 `epc`。
-
-**問題：** handler 是一般 C 函式，會改動 `a*`、`t*` 等暫存器。
-
-**正確作法：** 觸發 alarm 前先把 **整份** trapframe 存到 `alarm_trapframe`，`sigreturn` 再整份還原。
+第一直覺可能是只存 `epc`，但 handler 是一般 C 函式，會改動 `a*`、`t*` 等暫存器。正確做法是觸發 alarm 前把整份 trapframe 存到 `alarm_trapframe`，`sigreturn` 再整份還原。
 
 ```text
 Alarm 前:                 sigreturn 後:
@@ -303,7 +299,7 @@ trapframe->a0 = syscall_return_value
 
 如果 `sigreturn` 回傳 `0`，就會把剛恢復好的 `a0` 蓋掉。
 
-**解法：** `sys_sigreturn()` 回傳儲存的 `a0`：
+做法是讓 `sys_sigreturn()` 回傳儲存的 `a0`：
 
 ```c
 return p->alarm_trapframe.a0;  // syscall 再寫回同值，等於不變
@@ -329,23 +325,23 @@ return p->alarm_trapframe.a0;  // syscall 再寫回同值，等於不變
 
 ### 1. 沒有在進 handler 前儲存全部暫存器
 
-**錯誤：**
+錯誤：
 ```c
 p->alarm_trapframe.epc = p->trapframe->epc;  // 只存 PC
 p->trapframe->epc = (uint64)p->alarm_handler;
 ```
 
-**正確：**
+正確：
 ```c
 memmove(&p->alarm_trapframe, p->trapframe, sizeof(struct trapframe));  // 全存
 p->trapframe->epc = (uint64)p->alarm_handler;
 ```
 
-**後果：** handler 改到的任何暫存器（含編譯器暫存器）都可能讓 user 程式恢復後壞掉。
+handler 改到的任何暫存器（含編譯器暫存器）都可能讓 user 程式恢復後壞掉。
 
 ### 2. 忘記 `sigreturn` 的 `a0` 問題
 
-**錯誤：**
+錯誤：
 ```c
 uint64 sys_sigreturn(void) {
     memmove(p->trapframe, &p->alarm_trapframe, sizeof(struct trapframe));
@@ -354,7 +350,7 @@ uint64 sys_sigreturn(void) {
 }
 ```
 
-**正確：**
+正確：
 ```c
 uint64 sys_sigreturn(void) {
     memmove(p->trapframe, &p->alarm_trapframe, sizeof(struct trapframe));
@@ -365,13 +361,13 @@ uint64 sys_sigreturn(void) {
 
 ### 3. 重新導向前沒有先設 Guard
 
-**錯誤：**
+錯誤：
 ```c
 p->trapframe->epc = (uint64)p->alarm_handler;  // 先導向
 p->alarm_in_handler = 1;                        // 才設旗標
 ```
 
-**正確：**
+正確：
 ```c
 p->alarm_in_handler = 1;                        // 先設旗標
 p->trapframe->epc = (uint64)p->alarm_handler;
@@ -381,14 +377,14 @@ p->trapframe->epc = (uint64)p->alarm_handler;
 
 ### 4. Backtrace 停止條件錯誤
 
-**錯誤：**
+錯誤：
 ```c
 while (fp != 0) {  // 可能走進其他記憶體
     ...
 }
 ```
 
-**正確：**
+正確：
 ```c
 uint64 page_start = PGROUNDDOWN(fp);
 while (fp >= page_start && fp < page_start + PGSIZE) {

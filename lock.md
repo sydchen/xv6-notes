@@ -8,7 +8,7 @@ https://pdos.csail.mit.edu/6.1810/2025/labs/lock.html
 3. [Task 1: Per-CPU Memory Allocator](#task-1-per-cpu-memory-allocator)
 4. [Task 2: Read-Write Spinlock](#task-2-read-write-spinlock)
 5. [Code Sketches](#code-sketches)
-6. [Key Design Decisions](#key-design-decisions)
+6. [Design Decisions](#design-decisions)
 7. [Common Pitfalls](#common-pitfalls)
 
 ---
@@ -101,7 +101,7 @@ This is valuable when reads are frequent and writes are rare — e.g., a file sy
 
 Without special handling, a steady stream of readers can starve writers forever — each new reader arrives before the last finishes, so the reader count never reaches zero.
 
-**Writer priority** fixes this: when a writer is waiting, **new readers block** even if the lock is currently readable. Current readers can finish, but no new ones enter.
+Writer priority fixes this: when a writer is waiting, new readers block even if the lock is currently readable. Current readers can finish, but no new ones enter.
 
 ```
 readers_waiting  = 0    (readers see: can I enter?)
@@ -269,7 +269,7 @@ void write_release(struct rwspinlock *rwlk) {
 
 ---
 
-## Key Design Decisions
+## Design Decisions
 
 ### 1. Steal One Page at a Time
 
@@ -288,7 +288,7 @@ For xv6, one-at-a-time is simpler and good enough. Production allocators often s
 
 ### 3. Writers_waiting Blocks New Readers, Not Current Ones
 
-Writer priority blocks only **new** readers. Readers already inside continue to completion; forcefully ejecting them would require a much more complex design.
+Writer priority blocks only new readers. Readers already inside continue to completion; forcefully ejecting them would require a much more complex design.
 
 So a writer may still wait for current readers, but should eventually get in since new readers are stopped.
 
@@ -323,13 +323,13 @@ void write_release(struct rwspinlock *rwlk) {
 
 ### 1. Calling cpuid() Without Disabling Interrupts
 
-**Wrong:**
+Without `push_off`, a thread migration between `cpuid()` and `acquire()` means you lock CPU 0's list but execute on CPU 1:
 ```c
 int c = cpuid();           // interrupt could migrate thread here
 acquire(&kmem[c].lock);    // now operating on wrong CPU's list!
 ```
 
-**Correct:**
+Disable interrupts first:
 ```c
 push_off();
 int c = cpuid();           // safe: no migration while interrupts off
@@ -338,19 +338,17 @@ acquire(&kmem[c].lock);
 pop_off();
 ```
 
-Thread migration between `cpuid()` and `acquire()` means you'd lock CPU 0's list but execute on CPU 1 — the locked CPU ID and the actual CPU diverge.
-
 ### 2. Holding the Inner Lock During the Spin Loop
 
-**Wrong:**
+Spinning while holding the lock blocks other threads from updating `writer_active`:
 ```c
 acquire(&rwlk->lock);
 while (rwlk->writer_active) {
-    // spin here while holding the lock — other threads can't update writer_active!
+    // no one else can update writer_active here!
 }
 ```
 
-**Correct:**
+Release and re-acquire on each iteration:
 ```c
 acquire(&rwlk->lock);
 while (rwlk->writer_active) {
@@ -361,16 +359,14 @@ while (rwlk->writer_active) {
 
 ### 3. Forgetting writers_waiting in read_acquire()
 
-**Wrong:**
+Only checking `writer_active` misses writers that are waiting but not yet active:
 ```c
-while (rwlk->writer_active) {   // only checks if writer currently active
+while (rwlk->writer_active) {   // writer with writers_waiting>0 is not yet active
     // ...
 }
 ```
 
-A writer waiting with `writers_waiting > 0` is not yet active. Without this check, new readers keep entering, and the waiting writer starves.
-
-**Correct:**
+New readers keep entering and the waiting writer starves. Check both:
 ```c
 while (rwlk->writer_active || rwlk->writers_waiting) {
     // ...
@@ -426,7 +422,7 @@ struct run *r = kmem[c].freelist;
 acquire(&kmem[i].lock);   // potential deadlock if two CPUs do this simultaneously
 ```
 
-**Correct:** release local lock before acquiring victim lock. The implementation above never holds two `kmem` locks at once.
+Release the local lock before acquiring the victim lock. The implementation above never holds two `kmem` locks at once.
 
 ---
 
